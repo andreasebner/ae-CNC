@@ -1,0 +1,9 @@
+{
+    "python.defaultInterpreterPath": "python3",
+    "python.terminal.activateEnvironment": true,
+    "files.associations": {
+        "*.gc": "plaintext"
+    },
+    "editor.formatOnSave": true,
+    "python.formatting.provider": "black"
+}

@@ -1,0 +1,10 @@
+input/*
+output/*
+*.tmp
+*.bak
+*.swp
+*.pyc
+__pycache__/
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,12 @@
+I have a CNC Router using UCCNC with a tangential Knife equiped. 
+
+The UCCNC automatically calculates the A Axis movements and befoer each XY movement the z axis is lifeted
+and the knife axis adjusted accordingly. 
+
+I use Lightburn as the CAM which in general is fine, but there is a problem with the G0 Z moves. 
+
+Like mentioned UCCNC lifts the z axis before each x y move and adjust the a axis. But this not done for 
+moves of the Z axis. This means it execuets the G0 Z movement, than automatically lifts the a axis and then follow
+the next G1 step. But the first G0 Z move is done with a non adjusted A knife. 
+Therefore wen need to adjust the A axis before the Z movement. The angle must be calculated based on the 
+movement which happens after the Z move. 

@@ -1,0 +1,23 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Generate Tangential Outputs",
+            "type": "shell",
+            "command": "python3",
+            "args": ["fix_tangential.py"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": [],
+            "detail": "Run the tangential knife fixer on all .gc files in input/"
+        }
+    ]
+}
