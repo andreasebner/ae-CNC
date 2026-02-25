@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 """
-Tangential knife A-axis pre-adjustment for UCCNC.
+Tangential knife micro-move pre-adjustment for UCCNC.
 
-LightBurn G-code does not include A-axis (tangential knife) orientation
-before G0 Z moves. UCCNC auto-adjusts A before XY moves, but NOT before
-Z-only moves, so the knife plunges at the wrong angle.
+UCCNC in tangential knife mode automatically calculates the A-axis position
+based on the XY movement direction, but it does NOT re-orient before Z-only
+moves.  Direct A-axis commands (G0/G1 A…) are not allowed in tangential mode.
 
-This script inserts a G0 A<angle> command before every G0 Z-only move,
-where the angle is calculated from the direction of the next XY movement.
+Workaround: before every G0 Z-only move, insert a tiny (0.001 mm) XY step
+in the direction of the NEXT real movement.  This causes UCCNC to rotate the
+knife to the correct angle before the plunge/retract.
 
 Supported move types after Z:
-  - G0  (rapid)      → angle from XY direction
-  - G1  (linear cut) → angle from XY direction
-  - G2  (CW arc)     → tangent at arc start  (perpendicular to radius)
-  - G3  (CCW arc)    → tangent at arc start  (perpendicular to radius)
+  - G0  (rapid)      → micro-step in XY direction
+  - G1  (linear cut) → micro-step in XY direction
+  - G2  (CW arc)     → micro-step along tangent at arc start
+  - G3  (CCW arc)    → micro-step along tangent at arc start
 
 Modal G-codes are tracked so bare "X… Y…" lines inherit the last G0-G3.
 
 Usage:
-    python fix_tangential.py                   # process all .gc in input/
-    python fix_tangential.py somefile.gc       # process a specific file
+    python fix_tangential_micro_move.py                   # process all .gc in input/
+    python fix_tangential_micro_move.py somefile.gc       # process a specific file
 """
 
 import re
@@ -31,6 +32,9 @@ import glob
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 INPUT_DIR = os.path.join(SCRIPT_DIR, "input")
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
+
+# Size of the micro-step in mm
+MICRO_STEP = 0.001
 
 # Motion G-codes whose mode is "sticky" (modal group 1)
 MODAL_MOTION_CODES = {0, 1, 2, 3}
@@ -61,12 +65,13 @@ def parse_gcode_params(line):
 
 def is_g0_z_only(line):
     """
-    Return True if the line is a G0 move with Z (nonzero) and NO X/Y.
+    Return True if the line is a G0 move with a negative Z and NO X/Y.
+    Only plunge moves (Z < 0) need knife orientation; retracts do not.
     """
     params = parse_gcode_params(line)
     if params.get('G') != 0:
         return False
-    if 'Z' not in params or params['Z'] == 0:
+    if 'Z' not in params or params['Z'] >= 0:
         return False
     if 'X' in params or 'Y' in params:
         return False
@@ -116,9 +121,6 @@ def _arc_start_tangent_from_r(g_code, dx, dy, r_val):
     # Unit vectors: along chord and perpendicular
     ux, uy = dx / d, dy / d
     # Choose perpendicular side based on sign(R) and CW/CCW
-    #   positive R + G2  → center to the right of chord direction
-    #   positive R + G3  → center to the left
-    #   negative R flips
     if (r_val > 0) == (g_code == 2):
         px, py = uy, -ux   # right-hand perpendicular
     else:
@@ -131,10 +133,10 @@ def _arc_start_tangent_from_r(g_code, dx, dy, r_val):
     return _arc_start_tangent(g_code, i_val, j_val)
 
 
-def find_next_move_angle(lines, start_idx):
+def find_next_move_direction(lines, start_idx):
     """
     Scan forward from start_idx to find the first line with an XY (or arc)
-    movement. Returns the knife entry angle in degrees [0, 360), or None.
+    movement.  Returns (dx, dy) unit direction vector, or None.
 
     Tracks modal G-code state so bare coordinate lines are handled.
     """
@@ -161,7 +163,8 @@ def find_next_move_angle(lines, start_idx):
         # G0 / G1 — linear moves
         if modal_g in (0, 1, None):
             if dx != 0 or dy != 0:
-                return _angle_deg(dx, dy)
+                mag = math.hypot(dx, dy)
+                return (dx / mag, dy / mag)
 
         # G2 / G3 — arcs
         elif modal_g in (2, 3):
@@ -177,13 +180,22 @@ def find_next_move_angle(lines, start_idx):
                 tx, ty = dx, dy
 
             if tx != 0 or ty != 0:
-                return _angle_deg(tx, ty)
+                mag = math.hypot(tx, ty)
+                return (tx / mag, ty / mag)
 
     return None
 
 
+def _format_coord(value):
+    """Format a coordinate value, stripping unnecessary trailing zeros."""
+    s = f"{value:.4f}"
+    # Strip trailing zeros but keep at least one decimal place
+    s = s.rstrip('0').rstrip('.')
+    return s
+
+
 def process_gcode(input_path, output_path):
-    """Read a G-code file, insert A-axis adjustments, write result."""
+    """Read a G-code file, insert micro-move adjustments, write result."""
     with open(input_path, 'r') as f:
         lines = f.readlines()
 
@@ -192,20 +204,37 @@ def process_gcode(input_path, output_path):
 
     for i, line in enumerate(lines):
         if is_g0_z_only(line.strip()):
-            angle = find_next_move_angle(lines, i + 1)
-            if angle is not None:
-                comment = " ;tangential pre-adjust for next cut direction"
-                output_lines.append("G90\n")
-                output_lines.append(f"G0 A{angle:.2f}{comment}\n")
-                output_lines.append("G91\n")
+            direction = find_next_move_direction(lines, i + 1)
+            if direction is not None:
+                ux, uy = direction
+
+                # Extract the Z value from the original line
+                z_params = parse_gcode_params(line.strip())
+                z_val = z_params['Z']
+
+                # Build combined line: micro-move XY + Z on same G0 line
+                # Use a fixed 0.001 on each axis that participates in the move
+                parts = ["G0"]
+                if abs(ux) > 1e-9:
+                    parts.append(f"X{_format_coord(math.copysign(MICRO_STEP, ux))}")
+                if abs(uy) > 1e-9:
+                    parts.append(f"Y{_format_coord(math.copysign(MICRO_STEP, uy))}")
+                parts.append(f"Z{_format_coord(z_val)}")
+
+                comment = " (tangential micro-move to orient knife)"
+                combined_line = " ".join(parts) + comment + "\n"
+                output_lines.append(combined_line)
                 adjustments += 1
-        output_lines.append(line)
+            else:
+                output_lines.append(line)
+        else:
+            output_lines.append(line)
 
     with open(output_path, 'w') as f:
         f.writelines(output_lines)
 
     print(f"  {os.path.basename(input_path)} -> {os.path.basename(output_path)}"
-          f"  ({adjustments} A-axis adjustment(s) inserted)")
+          f"  ({adjustments} micro-move(s) inserted)")
 
 
 def main():
@@ -215,8 +244,6 @@ def main():
     if len(sys.argv) > 1:
         input_files = []
         for arg in sys.argv[1:]:
-            # Try the path as given (absolute or relative to CWD) first,
-            # then fall back to treating it as a filename inside INPUT_DIR.
             if os.path.isabs(arg):
                 candidates = [arg]
             else:
